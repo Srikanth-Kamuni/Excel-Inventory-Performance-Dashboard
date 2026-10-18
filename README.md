@@ -56,3 +56,10 @@ Inventory teams need a consistent way to compare revenue, profit, costs and prod
 
 ## Portfolio description
 Developed an Excel inventory performance dashboard using 365 records to report revenue, profitability, expenses and product stock movement. Organized monthly, category and product analysis using pivot summaries and dashboard KPIs.
+
+## Dashboard Preview
+
+### 1. Summary Dashboard
+
+##[Bank Loan Summary Dashboard]<img width="999" height="473" alt="Inventory_Performance_dashboard" src="https://github.com/user-attachments/assets/f197d857-f78f-4f32-a245-b6a9865eadff" />
+
