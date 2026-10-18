@@ -1,0 +1,757 @@
+Option Explicit
+
+Private Const C_NAVY As Long = 8200479
+Private Const C_BLUE As Long = 12874308
+Private Const C_BG As Long = 16512756
+Private Const C_WHITE As Long = 16777215
+
+' Import this .bas file into the workbook containing Data.
+' Target: desktop Excel for Windows with PivotTable slicer support.
+' Re-running replaces the generated Pivot and Dashboard worksheets.
+Public Sub CreateInventoryDashboard()
+    Dim wb As Workbook, dataWS As Worksheet, pivotWS As Worksheet
+    Dim dashWS As Worksheet, sourceRange As Range, pc As PivotCache
+    Dim pt1 As PivotTable, pt2 As PivotTable, pt3 As PivotTable
+    Dim pt4 As PivotTable, pt5 As PivotTable
+    Dim lastRow As Long, lastCol As Long
+    Dim oldScreen As Boolean, oldAlerts As Boolean, oldEvents As Boolean
+    Dim oldCalculation As XlCalculation, messageText As String
+    Dim failure As Boolean, buildStage As String
+
+    oldScreen = Application.ScreenUpdating
+    oldAlerts = Application.DisplayAlerts
+    oldCalculation = Application.Calculation
+    oldEvents = Application.EnableEvents
+    On Error GoTo ErrHandler
+    Set wb = ThisWorkbook
+    buildStage = "Validate source data"
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+
+    Set dataWS = GetWorksheet(wb, "Data")
+    If dataWS Is Nothing Then
+        Err.Raise vbObjectError + 100, "InventoryDashboard", "Worksheet 'Data' was not found."
+    End If
+    ValidateHeaders dataWS
+    ' Validate the source before replacing any generated sheets.
+    lastRow = LastUsedRow(dataWS)
+    lastCol = LastUsedCol(dataWS)
+    If lastRow < 2 Then
+        Err.Raise vbObjectError + 101, "InventoryDashboard", "Data needs a header row and at least one data row."
+    End If
+    Set sourceRange = dataWS.Range(dataWS.Cells(1, 1), dataWS.Cells(lastRow, lastCol))
+    ValidateSource sourceRange
+    If wb.ProtectStructure Then
+        Err.Raise vbObjectError + 103, "InventoryDashboard", "Unprotect the workbook structure before building."
+    End If
+    buildStage = "Replace generated worksheets"
+    DeleteDashboardObjects wb
+
+    Set pivotWS = wb.Worksheets.Add(After:=wb.Sheets(wb.Sheets.Count))
+    pivotWS.Name = "Pivot"
+    pivotWS.Tab.Color = RGB(68, 114, 196)
+    pivotWS.Visible = xlSheetVisible
+    Set pc = wb.PivotCaches.Create(SourceType:=xlDatabase, _
+        SourceData:=sourceRange.Address(ReferenceStyle:=xlR1C1, External:=True))
+    pc.MissingItemsLimit = xlMissingItemsNone
+
+    buildStage = "Create five PivotTables"
+    Set pt1 = CreatePT(pc, pivotWS, pivotWS.Range("A2"), "PT_Monthly")
+    AddPTRowField pt1, "Month"
+    SafeAddDataField pt1, "Revenue", "$#,##0", "Total Revenue"
+    SafeAddDataField pt1, "Profit", "$#,##0", "Total Profit"
+    SafeAddDataField pt1, "Expenses", "$#,##0", "Total Expenses"
+    SafeAddDataField pt1, "Stock Out", "#,##0", "UnitsSold"
+    FinishPT pt1, pivotWS.Range("A1"), "Monthly Performance"
+
+    Set pt2 = CreatePT(pc, pivotWS, pivotWS.Cells(2, SafeNextCol(pt1)), "PT_Category")
+    AddPTRowField pt2, "Category"
+    SafeAddDataField pt2, "Revenue", "$#,##0", "Total Revenue"
+    SafeAddDataField pt2, "Profit", "$#,##0", "Total Profit"
+    FinishPT pt2, pivotWS.Cells(1, pt2.TableRange2.Column), "Category Performance"
+
+    Set pt3 = CreatePT(pc, pivotWS, pivotWS.Cells(2, SafeNextCol(pt2)), "PT_Product")
+    AddPTRowField pt3, "Product"
+    SafeAddDataField pt3, "Revenue", "$#,##0", "Total Revenue"
+    SafeAddDataField pt3, "Profit", "$#,##0", "Total Profit"
+    SafeAddDataField pt3, "Stock Out", "#,##0", "UnitsSold"
+    FinishPT pt3, pivotWS.Cells(1, pt3.TableRange2.Column), "Product Performance"
+
+    Set pt4 = CreatePT(pc, pivotWS, pivotWS.Cells(2, SafeNextCol(pt3)), "PT_Supplier")
+    AddPTRowField pt4, "Supplier"
+    SafeAddDataField pt4, "Revenue", "$#,##0", "Total Revenue"
+    SafeAddDataField pt4, "Profit", "$#,##0", "Total Profit"
+    FinishPT pt4, pivotWS.Cells(1, pt4.TableRange2.Column), "Supplier Performance"
+
+    Set pt5 = CreatePT(pc, pivotWS, pivotWS.Cells(2, SafeNextCol(pt4)), "PT_StockFlow")
+    AddPTRowField pt5, "Month"
+    SafeAddDataField pt5, "Stock In", "#,##0", "StockIn"
+    SafeAddDataField pt5, "Stock Out", "#,##0", "StockOut"
+    FinishPT pt5, pivotWS.Cells(1, pt5.TableRange2.Column), "Stock Flow"
+    pivotWS.Columns.AutoFit
+    FormatPivotSheet pivotWS
+
+    Set dashWS = wb.Worksheets.Add(After:=wb.Sheets(wb.Sheets.Count))
+    dashWS.Name = "Dashboard"
+    dashWS.Tab.Color = RGB(31, 73, 125)
+    buildStage = "Build dashboard layout"
+    BuildDashboardLayout dashWS
+    buildStage = "Build KPI cards"
+    BuildKpis dashWS, pt1
+    dashWS.Activate
+    buildStage = "Build charts"
+    BuildCharts dashWS, pt1, pt2, pt3, pt4, pt5
+    buildStage = "Build slicers"
+    BuildSlicers wb, dashWS, pt1, pt2, pt3, pt4, pt5
+    dashWS.Activate
+    dashWS.Range("A1").Select
+    If Not Application.ActiveWindow Is Nothing Then
+        Application.ActiveWindow.DisplayGridlines = False
+        Application.ActiveWindow.Zoom = 70
+    End If
+    Application.Calculation = xlCalculationAutomatic
+    buildStage = "Calculate dashboard"
+    Application.CalculateFull
+    StoreBuildStatus "SUCCESS: Inventory dashboard created."
+
+Cleanup:
+    On Error Resume Next
+    Application.Calculation = oldCalculation
+    Application.DisplayAlerts = oldAlerts
+    Application.ScreenUpdating = oldScreen
+    Application.EnableEvents = oldEvents
+    On Error GoTo 0
+    If failure Then
+        If Application.Visible Then
+            MsgBox messageText, vbExclamation, "Inventory Dashboard"
+        Else
+            StoreBuildStatus messageText
+        End If
+    End If
+    Exit Sub
+
+ErrHandler:
+    failure = True
+    messageText = "Build failed. Error " & CStr(Err.Number) & ": " & Err.Description & _
+        vbCrLf & "Stage: " & buildStage & vbCrLf & "Source: " & Err.Source & _
+        vbCrLf & vbCrLf & "Required headers: " & RequiredHeaderText()
+CleanupWithMessage:
+    GoTo Cleanup
+End Sub
+
+Private Function RequiredHeaderText() As String
+    RequiredHeaderText = "Month, Category, Product, Supplier, Revenue, Profit, Expenses, Stock In, Stock Out"
+End Function
+
+Private Sub ValidateHeaders(ByVal ws As Worksheet)
+    Dim required As Variant, item As Variant, missing As String
+    required = Array("Month", "Category", "Product", "Supplier", "Revenue", _
+                     "Profit", "Expenses", "Stock In", "Stock Out")
+    For Each item In required
+        If IsError(Application.Match(CStr(item), ws.Rows(1), 0)) Then
+            If Len(missing) > 0 Then missing = missing & ", "
+            missing = missing & CStr(item)
+        End If
+    Next item
+    If Len(missing) > 0 Then
+        Err.Raise vbObjectError + 102, "ValidateHeaders", "Missing required columns: " & missing
+    End If
+End Sub
+
+Private Sub ValidateSource(ByVal sourceRange As Range)
+    Dim headers As Object, values As Variant, numericFields As Variant
+    Dim c As Long, r As Long, index As Long, item As Variant, text As String
+    Set headers = CreateObject("Scripting.Dictionary")
+    headers.CompareMode = vbTextCompare
+    values = sourceRange.Value2
+    For c = 1 To UBound(values, 2)
+        If IsError(values(1, c)) Then
+            Err.Raise vbObjectError + 104, "ValidateSource", "An error exists in header column " & c & "."
+        End If
+        text = Trim$(CStr(values(1, c)))
+        If Len(text) = 0 Then
+            Err.Raise vbObjectError + 104, "ValidateSource", "Blank header in column " & c & "."
+        End If
+        If headers.Exists(text) Then
+            Err.Raise vbObjectError + 104, "ValidateSource", "Duplicate header: " & text
+        End If
+        headers.Add text, c
+    Next c
+    numericFields = Array("Revenue", "Profit", "Expenses", "Stock In", "Stock Out")
+    For Each item In numericFields
+        index = CLng(headers(CStr(item)))
+        For r = 2 To UBound(values, 1)
+            If IsError(values(r, index)) Then
+                Err.Raise vbObjectError + 105, "ValidateSource", "Excel error in " & item & ", row " & r & "."
+            End If
+            If Not IsEmpty(values(r, index)) Then
+                If VarType(values(r, index)) = vbString Or Not IsNumeric(values(r, index)) Then
+                    Err.Raise vbObjectError + 105, "ValidateSource", _
+                        "Use numeric cells or truly empty cells in " & item & ", row " & r & "."
+                End If
+            End If
+        Next r
+    Next item
+End Sub
+
+Private Function GetWorksheet(ByVal wb As Workbook, ByVal sheetName As String) As Worksheet
+    On Error Resume Next
+    Set GetWorksheet = wb.Worksheets(sheetName)
+    On Error GoTo 0
+End Function
+
+Private Function LastUsedRow(ByVal ws As Worksheet) As Long
+    Dim found As Range
+    Set found = ws.Cells.Find(What:="*", After:=ws.Cells(1, 1), LookIn:=xlFormulas, _
+        LookAt:=xlPart, SearchOrder:=xlByRows, SearchDirection:=xlPrevious, _
+        MatchCase:=False, SearchFormat:=False)
+    If Not found Is Nothing Then LastUsedRow = found.Row
+End Function
+
+Private Function LastUsedCol(ByVal ws As Worksheet) As Long
+    Dim found As Range
+    Set found = ws.Cells.Find(What:="*", After:=ws.Cells(1, 1), LookIn:=xlFormulas, _
+        LookAt:=xlPart, SearchOrder:=xlByColumns, SearchDirection:=xlPrevious, _
+        MatchCase:=False, SearchFormat:=False)
+    If Not found Is Nothing Then LastUsedCol = found.Column
+End Function
+
+Private Sub DeleteDashboardObjects(ByVal wb As Workbook)
+    Dim item As Variant, ws As Worksheet, i As Long
+    Dim savedAlerts As Boolean
+    savedAlerts = Application.DisplayAlerts
+    On Error Resume Next
+    For Each item In Array("SC_Month", "SC_Category", "SC_Product", "SC_Supplier")
+        wb.SlicerCaches(CStr(item)).Delete
+    Next item
+    On Error GoTo 0
+    ' Deletion errors must reach the main handler, not produce a false success.
+    Application.DisplayAlerts = False
+    For Each item In Array("Dashboard", "Pivot")
+        Set ws = GetWorksheet(wb, CStr(item))
+        If Not ws Is Nothing Then ws.Delete
+    Next item
+    For i = wb.Names.Count To 1 Step -1
+        If InStr(1, wb.Names(i).Name, "__ID_", vbTextCompare) > 0 Then wb.Names(i).Delete
+    Next i
+    Application.DisplayAlerts = savedAlerts
+End Sub
+
+Private Sub StoreBuildStatus(ByVal statusText As String)
+    On Error Resume Next
+    ThisWorkbook.Names("__DashboardBuildStatus").Delete
+    ThisWorkbook.Names.Add Name:="__DashboardBuildStatus", _
+        RefersTo:="=""" & Replace(statusText, """", """""") & """", Visible:=False
+    On Error GoTo 0
+End Sub
+
+Private Function CreatePT(ByVal pc As PivotCache, ByVal ws As Worksheet, _
+                          ByVal target As Range, ByVal ptName As String) As PivotTable
+    Dim pt As PivotTable
+    Set pt = pc.CreatePivotTable(TableDestination:=target, TableName:=ptName)
+    With pt
+        .ManualUpdate = True
+        .TableStyle2 = "PivotStyleMedium9"
+        .RowAxisLayout xlTabularRow
+        .DisplayErrorString = True
+        .ErrorString = ""
+        .ColumnGrand = True
+        .RowGrand = True
+        .MergeLabels = False
+    End With
+    Set CreatePT = pt
+End Function
+
+Private Sub AddPTRowField(ByVal pt As PivotTable, ByVal fieldName As String)
+    Dim i As Long
+    With pt.PivotFields(fieldName)
+        .Orientation = xlRowField
+        .Position = 1
+        For i = 1 To 12
+            .Subtotals(i) = False
+        Next i
+    End With
+End Sub
+
+Private Sub SafeAddDataField(ByVal pt As PivotTable, ByVal srcField As String, _
+                             ByVal numFmt As String, ByVal displayName As String)
+    Dim field As PivotField, captionError As Long
+    Set field = pt.AddDataField(pt.PivotFields(srcField), , xlSum)
+    field.NumberFormat = numFmt
+    On Error Resume Next
+    field.Caption = displayName
+    captionError = Err.Number
+    Err.Clear
+    On Error GoTo 0
+    If captionError <> 0 Then field.Caption = displayName & " "
+End Sub
+
+Private Sub FinishPT(ByVal pt As PivotTable, ByVal headerCell As Range, ByVal title As String)
+    pt.DataPivotField.Orientation = xlColumnField
+    pt.ManualUpdate = False
+    If Not pt.RefreshTable Then Err.Raise vbObjectError + 106, "FinishPT", "Cannot refresh " & pt.Name
+    With headerCell
+        .Value2 = title
+        .Font.Name = "Calibri"
+        .Font.Size = 10
+        .Font.Bold = True
+        .Font.Color = C_WHITE
+        .Interior.Color = RGB(31, 73, 125)
+        .HorizontalAlignment = xlLeft
+    End With
+End Sub
+
+Private Function SafeNextCol(ByVal pt As PivotTable) As Long
+    SafeNextCol = pt.TableRange2.Column + pt.TableRange2.Columns.Count + 2
+End Function
+
+Private Sub FormatPivotSheet(ByVal ws As Worksheet)
+    Dim item As Variant, pt As PivotTable, header As Range
+    On Error Resume Next
+    For Each item In Array("A1:E1", "H1:J1", "M1:P1", "S1:U1", "X1:Z1")
+        ws.Range(CStr(item)).Merge
+    Next item
+    For Each item In Array(23, 18, 12, 7)
+        ws.Columns(CLng(item)).Delete
+    Next item
+    For Each pt In ws.PivotTables
+        Set header = ws.Cells(1, pt.TableRange2.Column).MergeArea
+        header.Interior.Color = RGB(31, 73, 125)
+        header.Font.Color = C_WHITE
+        header.Font.Name = "Calibri"
+        header.Font.Size = 10
+        header.Font.Bold = True
+        header.HorizontalAlignment = xlLeft
+    Next pt
+    On Error GoTo 0
+End Sub
+
+Private Sub BuildDashboardLayout(ByVal ws As Worksheet)
+    With ws
+        .Cells.Clear
+        ' Limit formatting to the dashboard to avoid an enormous UsedRange.
+        .Range("A1:AD35").Interior.Color = RGB(244, 246, 251)
+        .Range("A:AD").ColumnWidth = 7.2
+        .Rows(1).RowHeight = 54
+        .Rows(2).RowHeight = 8
+        .Rows(3).RowHeight = 26
+        .Rows(4).RowHeight = 34
+        .Rows(5).RowHeight = 8
+        .Rows("6:35").RowHeight = 14
+        .Range("A1:Z1").Merge
+        With .Range("A1")
+            .Value2 = "INVENTORY PERFORMANCE DASHBOARD"
+            .Interior.Color = RGB(41, 98, 181)
+            .Font.Name = "Calibri"
+            .Font.Size = 36
+            .Font.Bold = True
+            .Font.Color = C_WHITE
+            .HorizontalAlignment = xlCenter
+            .VerticalAlignment = xlCenter
+        End With
+        .Range("A2:Z5").Interior.Color = RGB(244, 246, 251)
+        .Range("A1:Z35").BorderAround LineStyle:=xlContinuous, _
+            Weight:=xlThin, Color:=RGB(190, 200, 215)
+        .PageSetup.PrintArea = "$A$1:$Z$35"
+    End With
+End Sub
+
+Private Function DataCaption(ByVal pt As PivotTable, ByVal requested As String) As String
+    Dim field As PivotField
+    For Each field In pt.DataFields
+        If StrComp(Trim$(field.Caption), requested, vbTextCompare) = 0 Then
+            DataCaption = field.Caption
+            Exit Function
+        End If
+    Next field
+    Err.Raise vbObjectError + 107, "DataCaption", "Missing data field: " & requested
+End Function
+
+Private Function PivotExpression(ByVal pt As PivotTable, ByVal caption As String) As String
+    PivotExpression = "GETPIVOTDATA(""" & Replace(DataCaption(pt, caption), """", """""") & _
+        """,'" & Replace(pt.Parent.Name, "'", "''") & "'!" & _
+        pt.TableRange2.Cells(1, 1).Address & ")"
+End Function
+
+Private Sub BuildKpis(ByVal ws As Worksheet, ByVal pt As PivotTable)
+    Dim titles As Variant, fields As Variant, formats As Variant, colors As Variant
+    Dim i As Long, firstCol As Long, labelRange As Range, valueRange As Range
+    Dim expression As String
+    titles = Array("REVENUE", "PROFIT", "UNITS SOLD", "EXPENSES", "MARGIN")
+    fields = Array("Total Revenue", "Total Profit", "UnitsSold", "Total Expenses")
+    formats = Array("$#,##0", "$#,##0", "#,##0", "$#,##0", "0.0%")
+    colors = Array(RGB(41, 98, 181), RGB(46, 160, 100), RGB(230, 130, 30), _
+                   RGB(190, 60, 60), RGB(120, 80, 200))
+    For i = 0 To 4
+        firstCol = 2 + i * 5
+        Set labelRange = ws.Range(ws.Cells(3, firstCol), ws.Cells(3, firstCol + 3))
+        Set valueRange = ws.Range(ws.Cells(4, firstCol), ws.Cells(4, firstCol + 3))
+        labelRange.Merge
+        valueRange.Merge
+        With labelRange
+            .Cells(1, 1).Value2 = titles(i)
+            .Font.Name = "Calibri"
+            .Font.Size = 16
+            .Font.Bold = True
+            .Font.Color = C_WHITE
+            .Interior.Color = CLng(colors(i))
+            .HorizontalAlignment = xlCenter
+            .VerticalAlignment = xlCenter
+            .BorderAround xlContinuous, xlThin, Color:=CLng(colors(i))
+        End With
+        If i < 4 Then
+            expression = PivotExpression(pt, CStr(fields(i)))
+        Else
+            expression = PivotExpression(pt, "Total Profit") & "/" & PivotExpression(pt, "Total Revenue")
+        End If
+        With valueRange
+            .Cells(1, 1).Formula = "=IFERROR(" & expression & ",0)"
+            .NumberFormat = CStr(formats(i))
+            .Font.Name = "Calibri"
+            .Font.Size = 20
+            .Font.Bold = True
+            .Font.Color = CLng(colors(i))
+            .Interior.Color = C_WHITE
+            .HorizontalAlignment = xlCenter
+            .VerticalAlignment = xlCenter
+            .BorderAround xlContinuous, xlThin, Color:=CLng(colors(i))
+        End With
+    Next i
+End Sub
+
+Private Sub BuildCharts(ByVal ws As Worksheet, ByVal pt1 As PivotTable, _
+                        ByVal pt2 As PivotTable, ByVal pt3 As PivotTable, _
+                        ByVal pt4 As PivotTable, ByVal pt5 As PivotTable)
+    Const GAP_X As Double = 6
+    Const GAP_Y As Double = 8
+    Const PAD_LEFT As Double = 2
+    Const PAD_RIGHT As Double = 2
+    Const PAD_TOP As Double = 2
+    Const PAD_BOT As Double = 2
+    Dim leftEdge As Double, rightEdge As Double, topEdge As Double, bottomEdge As Double
+    Dim width As Double, height As Double
+    leftEdge = ws.Cells(6, 4).Left + PAD_LEFT
+    rightEdge = ws.Cells(6, 26).Left + ws.Cells(6, 26).Width - PAD_RIGHT
+    topEdge = ws.Cells(6, 1).Top + PAD_TOP
+    bottomEdge = ws.Cells(35, 1).Top + ws.Cells(35, 1).Height - PAD_BOT
+    width = (rightEdge - leftEdge - 2 * GAP_X) / 3
+    height = (bottomEdge - topEdge - GAP_Y) / 2
+    AddChart ws, pt1, "LINE", "Revenue & Profit", leftEdge, topEdge, width, height
+    AddChart ws, pt2, "PIE", "Revenue by Category", leftEdge + width + GAP_X, topEdge, width, height
+    AddChart ws, pt3, "BAR_PRODUCT", "Revenue by Product", leftEdge + 2 * (width + GAP_X), topEdge, width, height
+    AddChart ws, pt4, "AREA", "Revenue by Supplier", leftEdge, topEdge + height + GAP_Y, width, height
+    AddChart ws, pt5, "COMBO", "Stock In vs Stock Out", leftEdge + width + GAP_X, topEdge + height + GAP_Y, width, height
+    AddChart ws, pt1, "STACKED", "Revenue vs Expenses", leftEdge + 2 * (width + GAP_X), topEdge + height + GAP_Y, width, height
+End Sub
+
+' Ordinary charts use dynamic named ranges pointing to pivot cells.
+' This avoids PivotChart restrictions and keeps series aligned after slicer changes.
+Private Sub AddChart(ByVal ws As Worksheet, ByVal pt As PivotTable, ByVal kind As String, _
+                     ByVal title As String, ByVal leftPos As Double, ByVal topPos As Double, _
+                     ByVal chartWidth As Double, ByVal chartHeight As Double)
+    Dim co As ChartObject, ch As Chart, fields As Variant, item As Variant
+    Set co = ws.ChartObjects.Add(leftPos, topPos, chartWidth, chartHeight)
+    co.Name = "ID_" & kind
+    co.Placement = xlFreeFloating
+    Set ch = co.Chart
+    Select Case kind
+        Case "LINE": ch.ChartType = xlLineMarkers
+        Case "PIE": ch.ChartType = xlPie
+        Case "BAR_PRODUCT": ch.ChartType = xlBarClustered
+        Case "AREA": ch.ChartType = xlArea
+        Case "COMBO": ch.ChartType = xlColumnClustered
+        Case "STACKED": ch.ChartType = xlColumnStacked
+        Case Else: Err.Raise vbObjectError + 108, "AddChart", "Unknown chart type: " & kind
+    End Select
+    Do While ch.SeriesCollection.Count > 0
+        ch.SeriesCollection(1).Delete
+    Loop
+    Select Case kind
+        Case "LINE": fields = Array("Total Revenue", "Total Profit")
+        Case "PIE", "BAR_PRODUCT", "AREA": fields = Array("Total Revenue")
+        Case "COMBO": fields = Array("StockIn", "StockOut")
+        Case "STACKED": fields = Array("Total Revenue", "Total Expenses")
+    End Select
+    For Each item In fields
+        AddDynamicSeries ch, pt, CStr(item), kind
+    Next item
+    If kind = "COMBO" Then ch.SeriesCollection(2).ChartType = xlLineMarkers
+    With ch
+        .HasTitle = True
+        .ChartTitle.Text = title
+        With .ChartTitle.Font
+            .Name = "Calibri"
+            .Bold = True
+            .Color = RGB(31, 73, 125)
+            .Size = 16
+        End With
+        .ChartArea.Format.Fill.Solid
+        .ChartArea.Format.Fill.ForeColor.RGB = C_WHITE
+        .ChartArea.Format.Line.Visible = msoTrue
+        .ChartArea.Format.Line.ForeColor.RGB = RGB(31, 73, 125)
+        .ChartArea.Format.Line.Weight = 1
+        .PlotArea.Format.Fill.Visible = msoFalse
+        .HasLegend = False
+        .DisplayBlanksAs = xlNotPlotted
+        .PlotVisibleOnly = False
+    End With
+    FormatAxes ch
+    FormatSeries ch, kind
+    ' These are optional layout properties; data/series creation errors are not suppressed.
+    On Error Resume Next
+    ch.ShowAllFieldButtons = False
+    ch.HasLegend = True
+    ch.Legend.Position = xlLegendPositionBottom
+    ch.Legend.Font.Name = "Calibri"
+    ch.Legend.Font.Size = 12
+    Select Case kind
+        Case "LINE"
+            RemoveHorizontalAxis ch
+            ch.Axes(xlValue).TickLabels.Font.Size = 12
+            ch.Legend.Width = 321.83
+            ch.Legend.Left = 0.318
+        Case "PIE"
+            ch.Legend.Left = (ch.ChartArea.Width - ch.Legend.Width) / 2
+            ch.PlotArea.Left = 99.128
+            ch.PlotArea.Top = 40.444
+            ch.PlotArea.Width = 132.964
+            ch.PlotArea.Height = 132.964
+            ch.SeriesCollection(1).ApplyDataLabels
+            With ch.SeriesCollection(1).DataLabels
+                .ShowValue = False
+                .ShowCategoryName = False
+                .ShowSeriesName = False
+                .ShowLegendKey = False
+                .ShowPercentage = True
+                .NumberFormat = "0%"
+                .Font.Name = "Calibri"
+                .Font.Size = 12
+                .Font.Bold = True
+                .Font.Color = C_WHITE
+            End With
+        Case "BAR_PRODUCT"
+            ch.ChartGroups(1).Overlap = 0
+            ch.ChartGroups(1).GapWidth = 0
+            ch.Axes(xlValue).Delete
+            ch.Axes(xlCategory).TickLabels.Font.Size = 12
+        Case "AREA"
+            ch.Axes(xlValue).TickLabels.Font.Size = 12
+            ch.Axes(xlCategory).TickLabels.Font.Size = 12
+        Case "COMBO"
+            ch.ChartGroups(1).GapWidth = 97
+            ch.Axes(xlValue).TickLabels.Font.Size = 12
+            ch.Axes(xlCategory).TickLabels.Font.Size = 12
+        Case "STACKED"
+            ch.ChartGroups(1).GapWidth = 100
+            ch.Axes(xlValue).Delete
+            ch.Axes(xlCategory).TickLabels.Font.Size = 12
+            ch.PlotArea.Left = 10
+            ch.PlotArea.Top = 30.855
+            ch.PlotArea.Width = ch.ChartArea.Width - 20
+            ch.PlotArea.Height = 108.881
+            ch.Legend.Left = 0
+            ch.Legend.Width = ch.ChartArea.Width
+            ch.Legend.Height = 20
+    End Select
+    On Error GoTo 0
+End Sub
+
+Private Sub AddDynamicSeries(ByVal ch As Chart, ByVal pt As PivotTable, _
+                             ByVal requested As String, ByVal kind As String)
+    Dim wb As Workbook, ws As Worksheet, field As PivotField, ser As Series
+    Dim firstRow As Long, lastRow As Long, categoryCol As Long, valueCol As Long
+    Dim categoryName As String, valueName As String, prefix As String
+    Dim sheetRef As String, heightExpression As String, bookRef As String
+    Dim operation As String, errorNumber As Long, errorText As String
+    Dim xRange As Range, yRange As Range
+    On Error GoTo SeriesError
+    operation = "Locate pivot data"
+    Set ws = pt.Parent
+    Set wb = ws.Parent
+    Set field = pt.DataFields(DataCaption(pt, requested))
+    firstRow = pt.DataBodyRange.Row
+    categoryCol = pt.TableRange1.Column
+    valueCol = field.DataRange.Column
+    lastRow = firstRow + LastUsedRow(wb.Worksheets("Data"))
+    If lastRow > ws.Rows.Count Then lastRow = ws.Rows.Count
+    sheetRef = "'" & Replace(ws.Name, "'", "''") & "'!"
+    ' One row field, no subtotals, and one bottom Grand Total row.
+    heightExpression = "MAX(1,COUNTA(" & sheetRef & _
+        ws.Range(ws.Cells(firstRow, categoryCol), ws.Cells(lastRow, categoryCol)).Address & ")-1)"
+    prefix = "__ID_" & kind & "_" & CStr(ch.SeriesCollection.Count + 1)
+    categoryName = prefix & "_X"
+    valueName = prefix & "_Y"
+    operation = "Define dynamic category range"
+    wb.Names.Add Name:=categoryName, RefersTo:="=OFFSET(" & sheetRef & _
+        ws.Cells(firstRow, categoryCol).Address & ",0,0," & heightExpression & ",1)", Visible:=False
+    operation = "Define dynamic value range"
+    wb.Names.Add Name:=valueName, RefersTo:="=OFFSET(" & sheetRef & _
+        ws.Cells(firstRow, valueCol).Address & ",0,0," & heightExpression & ",1)", Visible:=False
+    bookRef = "'" & Replace(wb.Name, "'", "''") & "'!"
+    operation = "Resolve dynamic ranges"
+    ws.Calculate
+    Set xRange = wb.Names(categoryName).RefersToRange
+    Set yRange = wb.Names(valueName).RefersToRange
+    If xRange.Rows.Count <> yRange.Rows.Count Then
+        Err.Raise vbObjectError + 111, "AddDynamicSeries", "Category/value range lengths differ."
+    End If
+    operation = "Create ordinary chart series"
+    Set ser = ch.SeriesCollection.NewSeries
+    ' Seed the series with valid ranges before binding the dynamic names.
+    ' Let Excel build the SERIES syntax instead of assembling it manually.
+    operation = "Assign initial category cells"
+    ser.XValues = xRange
+    operation = "Assign initial value cells"
+    ser.Values = yRange
+    operation = "Assign series caption"
+    ser.Name = Trim$(field.Caption)
+    operation = "Bind dynamic category name"
+    ser.XValues = "=" & bookRef & categoryName
+    operation = "Bind dynamic value name"
+    ser.Values = "=" & bookRef & valueName
+    Exit Sub
+SeriesError:
+    errorNumber = Err.Number
+    errorText = Err.Description
+    Err.Raise errorNumber, "AddDynamicSeries", _
+        "Chart " & kind & "; pivot " & pt.Name & "; field " & requested & _
+        "; operation: " & operation & ". " & errorText
+End Sub
+
+Private Sub FormatSeries(ByVal ch As Chart, ByVal kind As String)
+    Dim palette As Variant, i As Long, j As Long, color As Long, ser As Series
+    palette = Array(RGB(41, 98, 181), RGB(46, 160, 100), RGB(190, 60, 60), RGB(230, 130, 30))
+    For i = 1 To ch.SeriesCollection.Count
+        Set ser = ch.SeriesCollection(i)
+        color = CLng(palette((i - 1) Mod 4))
+        If kind = "PIE" Then
+            If i = 1 Then
+                For j = 1 To ser.Points.Count
+                    ser.Points(j).Format.Fill.Solid
+                    ser.Points(j).Format.Fill.ForeColor.RGB = CLng(palette((j - 1) Mod 4))
+                Next j
+            End If
+        ElseIf ser.ChartType = xlLineMarkers Or ser.ChartType = xlLine Then
+            With ser
+                .Format.Line.ForeColor.RGB = color
+                .Format.Line.Weight = 2
+                .MarkerStyle = xlMarkerStyleCircle
+                .MarkerSize = 5
+                .MarkerForegroundColor = color
+                .MarkerBackgroundColor = C_WHITE
+            End With
+        Else
+            ser.Format.Fill.Solid
+            ser.Format.Fill.ForeColor.RGB = color
+        End If
+    Next i
+End Sub
+
+Private Sub FormatAxes(ByVal ch As Chart)
+    Dim kind As Variant
+    On Error Resume Next
+    For Each kind In Array(xlValue, xlCategory)
+        With ch.Axes(CLng(kind))
+            .HasMajorGridlines = False
+            .HasMinorGridlines = False
+            .TickLabels.Font.Name = "Calibri"
+            .TickLabels.Font.Size = 9
+        End With
+    Next kind
+    On Error GoTo 0
+End Sub
+
+Private Sub BuildSlicers(ByVal wb As Workbook, ByVal dashWS As Worksheet, ByVal pt1 As PivotTable, ByVal pt2 As PivotTable, ByVal pt3 As PivotTable, ByVal pt4 As PivotTable, ByVal pt5 As PivotTable)
+    Const GAP As Double = 4
+    Dim fields As Variant, names As Variant, i As Long
+    Dim railLeft As Double, railTop As Double, railWidth As Double
+    Dim totalHeight As Double, slicerHeight As Double
+    Dim sourcePT As PivotTable, cache As SlicerCache, sl As Slicer
+    fields = Array("Month", "Supplier", "Category")
+    names = Array("SC_Month", "SC_Supplier", "SC_Category")
+    If pt1.CacheIndex <> pt2.CacheIndex Or pt1.CacheIndex <> pt3.CacheIndex Or _
+       pt1.CacheIndex <> pt4.CacheIndex Or pt1.CacheIndex <> pt5.CacheIndex Then
+        Err.Raise vbObjectError + 109, "BuildSlicers", "All five pivots must share the same PivotCache."
+    End If
+    railLeft = dashWS.Cells(6, 1).Left + 2
+    railTop = dashWS.Cells(6, 1).Top + 2
+    railWidth = dashWS.Range("A6:C6").Width - 4
+    totalHeight = dashWS.Range("A6:A35").Height - 4
+    slicerHeight = (totalHeight - 2 * GAP) / 3
+    For i = 0 To 2
+        Select Case CStr(fields(i))
+            Case "Month": Set sourcePT = pt1
+            Case "Supplier": Set sourcePT = pt4
+            Case "Category": Set sourcePT = pt2
+        End Select
+        Set cache = wb.SlicerCaches.Add(Source:=sourcePT, _
+            SourceField:=CStr(fields(i)), Name:=CStr(names(i)))
+        AddPivotToSlicer cache, pt1
+        AddPivotToSlicer cache, pt2
+        AddPivotToSlicer cache, pt3
+        AddPivotToSlicer cache, pt4
+        AddPivotToSlicer cache, pt5
+        ' The specified silent helper is followed by an explicit connection check.
+        If cache.PivotTables.Count <> 5 Then
+            Err.Raise vbObjectError + 110, "BuildSlicers", "Could not connect all pivots to " & fields(i) & "."
+        End If
+        Set sl = cache.Slicers.Add(SlicerDestination:=dashWS, _
+            Name:="SL_" & CStr(fields(i)), Caption:=CStr(fields(i)), _
+            Top:=railTop + i * (slicerHeight + GAP), Left:=railLeft, _
+            Width:=railWidth, Height:=slicerHeight)
+        ApplySlicerStyle sl
+        sl.NumberOfColumns = 2
+        sl.DisableMoveResizeUI = True
+        FormatSlicerShape sl, RGB(31, 73, 125), RGB(68, 114, 196)
+    Next i
+End Sub
+
+Private Sub ApplySlicerStyle(ByVal sl As Slicer)
+    Dim failed As Boolean
+    On Error Resume Next
+    sl.Style = "SlicerStyleDark1"
+    failed = (Err.Number <> 0)
+    Err.Clear
+    On Error GoTo 0
+    If failed Then sl.Style = "SlicerStyleLight2"
+End Sub
+
+Private Sub AddPivotToSlicer(ByVal cache As SlicerCache, ByVal pt As PivotTable)
+    On Error Resume Next
+    cache.PivotTables.AddPivotTable pt
+    On Error GoTo 0
+End Sub
+
+Private Sub FormatSlicerShape(ByVal sl As Slicer, ByVal borderColor As Long, ByVal fillColor As Long)
+    ' White shape fill is required; button fills are supplied by the slicer style.
+    ' fillColor is retained in the signature for compatibility with the brief.
+    With sl.Shape
+        .Fill.Visible = msoTrue
+        .Fill.Solid
+        .Fill.ForeColor.RGB = C_WHITE
+        .Line.Visible = msoTrue
+        .Line.ForeColor.RGB = borderColor
+        .Line.Weight = 1
+        .Shadow.Visible = msoFalse
+        .Placement = xlFreeFloating
+    End With
+End Sub
+
+Private Sub RemoveHorizontalAxis(ByVal ch As Chart)
+    On Error Resume Next
+    ch.Axes(xlCategory).Delete
+    On Error GoTo 0
+End Sub
+
+Private Sub ApplyChartTextSize(ByVal ch As Chart, ByVal fontSize As Long)
+    Dim ser As Series
+    On Error Resume Next
+    If ch.HasTitle Then ch.ChartTitle.Font.Size = fontSize
+    If ch.HasLegend Then ch.Legend.Font.Size = fontSize
+    For Each ser In ch.SeriesCollection
+        If ser.HasDataLabels Then ser.DataLabels.Font.Size = fontSize
+    Next ser
+    On Error GoTo 0
+End Sub
